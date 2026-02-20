@@ -1,0 +1,102 @@
+name: Build Elevation Tiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      states:
+        description: 'Comma-separated state codes (e.g., "RI,MA") or "ALL" for all states'
+        required: false
+        default: 'ALL'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        state:
+          - AL
+          - AK
+          - AZ
+          - AR
+          - CA
+          - CO
+          - CT
+          - DE
+          - FL
+          - GA
+          - HI
+          - ID
+          - IL
+          - IN
+          - IA
+          - KS
+          - KY
+          - LA
+          - ME
+          - MD
+          - MA
+          - MI
+          - MN
+          - MS
+          - MO
+          - MT
+          - NE
+          - NV
+          - NH
+          - NJ
+          - NM
+          - NY
+          - NC
+          - ND
+          - OH
+          - OK
+          - OR
+          - PA
+          - RI
+          - SC
+          - SD
+          - TN
+          - TX
+          - UT
+          - VT
+          - VA
+          - WA
+          - WV
+          - WI
+          - WY
+          - DC
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GDAL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin python3-gdal
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests
+
+      - name: Build tiles for ${{ matrix.state }}
+        run: |
+          python3 download_usgs_dem.py ${{ matrix.state }} -o output
+
+      - name: Upload to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: apps4av.org
+          username: apps4av
+          password: ${{ secrets.MAMBA_PASSWORD }}
+          port: 22
+          source: output/${{ matrix.state }}/${{ matrix.state }}.zip
+          target: /home/apps4av/mamba.dreamhosters.com/new/staging
+          strip_components: 2
