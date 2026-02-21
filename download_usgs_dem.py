@@ -325,12 +325,12 @@ def build_vrt(tiff_files: list, output_path: Path, nodata: float = -9999) -> boo
     return True
 
 
-def convert_to_8bit(
+def create_scaled_vrt(
     input_path: Path,
     output_path: Path
 ) -> bool:
     """
-    Convert DEM to 8-bit grayscale using avarex encoding.
+    Create a VRT that applies 8-bit avarex encoding without creating a large TIFF.
     
     Encoding formula (from avarex elevation_tile_provider.dart):
         elevation_ft = (pixel_value * 80.4711845056) - 364.431597044586
@@ -343,8 +343,8 @@ def convert_to_8bit(
         pixel 255 = 20,156 ft (6,143 m)
     
     Args:
-        input_path: Input DEM GeoTIFF path (elevation in meters)
-        output_path: Output 8-bit GeoTIFF path
+        input_path: Input DEM VRT/GeoTIFF path (elevation in meters)
+        output_path: Output VRT path with 8-bit scaling
         
     Returns:
         True if successful
@@ -354,25 +354,24 @@ def convert_to_8bit(
     INTERCEPT = -364.431597044586
     METERS_TO_FEET = 3.28084
     
-    print("Converting DEM to 8-bit using avarex encoding...")
+    print("Creating scaled VRT with avarex encoding (no large TIFF)...")
     print(f"  Formula: pixel = (elevation_m * {METERS_TO_FEET} + {-INTERCEPT:.2f}) / {SLOPE:.2f}")
     print(f"  Range: pixel 0 = {INTERCEPT:.0f} ft, pixel 255 = {255 * SLOPE + INTERCEPT:.0f} ft")
     
-    # Use gdal_calc.py for custom formula
-    # pixel = (elevation_m * 3.28084 + 364.431597044586) / 80.4711845056
-    # Clamp to 0-255 range
-    calc_formula = f"numpy.clip(((A * {METERS_TO_FEET}) + {-INTERCEPT}) / {SLOPE}, 0, 255)"
+    # Calculate scale parameters for gdal_translate
+    # We need to find the meter values that map to 0 and 255
+    # pixel 0: elevation_m = (0 * SLOPE + INTERCEPT) / METERS_TO_FEET
+    # pixel 255: elevation_m = (255 * SLOPE + INTERCEPT) / METERS_TO_FEET
+    src_min = (0 * SLOPE + INTERCEPT) / METERS_TO_FEET  # -111.07 m
+    src_max = (255 * SLOPE + INTERCEPT) / METERS_TO_FEET  # 6143.35 m
     
     cmd = [
-        "gdal_calc.py",
-        "-A", str(input_path),
-        f"--calc={calc_formula}",
-        f"--outfile={output_path}",
-        "--type=Byte",
-        "--co=COMPRESS=LZW",
-        "--co=BIGTIFF=YES",
-        "--hideNoData",
-        "--overwrite"
+        "gdal_translate",
+        "-of", "VRT",
+        "-ot", "Byte",
+        "-scale", str(src_min), str(src_max), "0", "255",
+        str(input_path),
+        str(output_path)
     ]
     
     print(f"Running: {' '.join(cmd)}")
@@ -384,27 +383,15 @@ def convert_to_8bit(
         print(f"stderr: {result.stderr}")
     
     if result.returncode != 0:
-        print(f"Error encoding to 8-bit (exit code {result.returncode})")
+        print(f"Error creating scaled VRT (exit code {result.returncode})")
         return False
     
     # Verify output file was created
     if not output_path.exists():
-        print(f"Error: Output file was not created: {output_path}")
+        print(f"Error: Output VRT was not created: {output_path}")
         return False
     
-    # Show output file info
-    info_cmd = ["gdalinfo", "-json", str(output_path)]
-    info_result = subprocess.run(info_cmd, capture_output=True, text=True)
-    if info_result.returncode == 0:
-        info = json.loads(info_result.stdout)
-        bands = len(info.get("bands", []))
-        size = info.get("size", [0, 0])
-        dtype = info.get("bands", [{}])[0].get("type", "unknown") if bands > 0 else "unknown"
-        print(f"Created 8-bit image: {output_path}")
-        print(f"  Size: {size[0]}x{size[1]}, Bands: {bands}, Type: {dtype}")
-    else:
-        print(f"Created image: {output_path}")
-    
+    print(f"Created scaled VRT: {output_path}")
     return True
 
 
@@ -665,7 +652,7 @@ def process_state(
     state_dir.mkdir(parents=True, exist_ok=True)
     
     vrt_path = state_dir / f"{name}.vrt"
-    scaled_path = state_dir / f"{name}_8bit.tif"
+    scaled_path = state_dir / f"{name}_8bit.vrt"
     tiles_base = state_dir / "tiles"
     tiles_dir = tiles_base / "6"
     manifest_prefix = "ELEV" if is_region else "ELEVATION"
@@ -693,13 +680,13 @@ def process_state(
     else:
         print(f"Using existing VRT: {vrt_path}")
     
-    # Step 4: Convert to 8-bit using avarex encoding
+    # Step 4: Create scaled VRT with 8-bit avarex encoding (no large TIFF)
     if not scaled_path.exists() or not skip_vrt:
-        if not convert_to_8bit(vrt_path, scaled_path):
-            print(f"Failed to convert to 8-bit for {name}")
+        if not create_scaled_vrt(vrt_path, scaled_path):
+            print(f"Failed to create scaled VRT for {name}")
             return False
     else:
-        print(f"Using existing 8-bit file: {scaled_path}")
+        print(f"Using existing scaled VRT: {scaled_path}")
     
     # Step 5: Create tiles using gdal2tiles (from 8-bit image)
     if xyz_tiles:
