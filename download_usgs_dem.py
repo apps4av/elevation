@@ -726,10 +726,21 @@ def create_zip(
             
             # Add openlayers.html if it exists (gdal2tiles puts it in tiles/6/)
             openlayers_file = tiles_base / "6" / "openlayers.html"
+            print(f"  Looking for openlayers.html at: {openlayers_file}")
             if openlayers_file.exists():
                 rel_path = openlayers_file.relative_to(tiles_base.parent)
                 zf.write(openlayers_file, str(rel_path))
                 print(f"  Added openlayers.html")
+            else:
+                # Try finding it recursively
+                html_files = list(tiles_base.rglob("openlayers.html"))
+                if html_files:
+                    for html_file in html_files:
+                        rel_path = html_file.relative_to(tiles_base.parent)
+                        zf.write(html_file, str(rel_path))
+                        print(f"  Added {rel_path}")
+                else:
+                    print(f"  openlayers.html not found")
         
         zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
         print(f"Created zip: {zip_path} ({zip_size_mb:.1f} MB, {tile_count} tiles)")
