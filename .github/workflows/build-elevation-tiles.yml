@@ -103,6 +103,6 @@ jobs:
           username: apps4av
           password: ${{ secrets.MAMBA_PASSWORD }}
           port: 22
-          source: output/${{ matrix.state }}/${{ matrix.state }}.zip
+          source: output/${{ matrix.state }}/ELEVATION_${{ matrix.state }}_NEW.zip
           target: /home/apps4av/mamba.dreamhosters.com/new/staging
           strip_components: 2

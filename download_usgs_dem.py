@@ -725,13 +725,13 @@ def create_zip(
                     print(f"  Added {tile_count} tiles...")
             
             # Add openlayers.html if it exists
-            # gdal2tiles puts it in the output directory (tiles/6/)
-            html_files = list(tiles_base.rglob("*.html"))
-            print(f"  Found {len(html_files)} HTML files in {tiles_base}")
-            for html_file in html_files:
+            openlayers_files = list(tiles_base.rglob("openlayers.html"))
+            for html_file in openlayers_files:
                 rel_path = html_file.relative_to(tiles_base.parent)
                 zf.write(html_file, str(rel_path))
-                print(f"  Added HTML: {rel_path}")
+                print(f"  Added: {rel_path}")
+            if not openlayers_files:
+                print(f"  Warning: openlayers.html not found in {tiles_base}")
         
         zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
         print(f"Created zip: {zip_path} ({zip_size_mb:.1f} MB, {tile_count} tiles)")
@@ -739,8 +739,8 @@ def create_zip(
         # Verify zip contents
         with zipfile.ZipFile(zip_path, 'r') as verify_zf:
             names = verify_zf.namelist()
-            html_in_zip = [n for n in names if n.endswith('.html')]
-            print(f"  Zip contains {len(names)} files, {len(html_in_zip)} HTML files: {html_in_zip}")
+            has_openlayers = any('openlayers.html' in n for n in names)
+            print(f"  Zip contains {len(names)} files, openlayers.html: {has_openlayers}")
         
         return True
         
@@ -792,7 +792,7 @@ def process_state(
     tiles_dir = tiles_base / "6"
     manifest_prefix = "ELEV" if is_region else "ELEVATION"
     manifest_path = state_dir / f"{manifest_prefix}_{name}_NEW"
-    zip_path = state_dir / f"{name}.zip"
+    zip_path = state_dir / f"{manifest_prefix}_{name}_NEW.zip"
     
     # Step 1: Download
     if not skip_download:
