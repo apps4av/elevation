@@ -456,29 +456,29 @@ def build_vrt(tiff_files: list, output_path: Path, nodata: float = -9999) -> boo
     return True
 
 
-def create_scaled_vrt(
+def create_scaled_8bit(
     input_path: Path,
     output_path: Path
 ) -> bool:
     """
-    Create a VRT that applies 8-bit elevation encoding without creating a large TIFF.
+    Create an 8-bit VRT with elevation encoding (no large file created).
     
     Encoding covers world elevation range:
-        pixel 0   = -430 m (-1,411 ft) - Dead Sea (lowest point on Earth)
-        pixel 254 = 8,849 m (29,032 ft) - Mount Everest (highest point on Earth)
-        pixel 255 = nodata (transparent)
+        pixel 0   = nodata (transparent)
+        pixel 1   = -430 m (-1,411 ft) - Dead Sea (lowest point on Earth)
+        pixel 255 = 8,849 m (29,032 ft) - Mount Everest (highest point on Earth)
     
     Decoding formula:
-        elevation_m = pixel_value * 36.53 - 430
-        elevation_ft = pixel_value * 119.85 - 1411
+        elevation_m = (pixel_value - 1) * 36.46 - 430
+        elevation_ft = (pixel_value - 1) * 119.63 - 1411
         
     Encoding formula:
-        pixel_value = (elevation_m + 430) / 36.53
-        pixel_value = (elevation_ft + 1411) / 119.85
+        pixel_value = (elevation_m + 430) / 36.46 + 1
+        pixel_value = (elevation_ft + 1411) / 119.63 + 1
     
     Args:
         input_path: Input DEM VRT/GeoTIFF path (elevation in meters)
-        output_path: Output VRT path with 8-bit scaling
+        output_path: Output 8-bit VRT path
         
     Returns:
         True if successful
@@ -487,28 +487,27 @@ def create_scaled_vrt(
     DEAD_SEA_M = -430      # Lowest point on Earth (meters)
     EVEREST_M = 8849       # Highest point on Earth (meters)
     
-    # Scale parameters
-    src_min = DEAD_SEA_M   # -430 m -> pixel 0
-    src_max = EVEREST_M    # 8849 m -> pixel 254
+    # Scale parameters (pixel 1 = lowest, pixel 255 = highest, pixel 0 = nodata)
+    src_min = DEAD_SEA_M   # -430 m -> pixel 1
+    src_max = EVEREST_M    # 8849 m -> pixel 255
     
     meters_per_pixel = (src_max - src_min) / 254
     feet_per_pixel = meters_per_pixel * 3.28084
     
     print("Creating scaled VRT with world elevation encoding...")
-    print(f"  Range: pixel 0 = {src_min} m, pixel 254 = {src_max} m")
+    print(f"  Range: pixel 1 = {src_min} m, pixel 255 = {src_max} m, pixel 0 = nodata")
     print(f"  Resolution: {meters_per_pixel:.2f} m/pixel ({feet_per_pixel:.2f} ft/pixel)")
-    print(f"  Decode: elevation_m = pixel * {meters_per_pixel:.2f} + {src_min}")
+    print(f"  Decode: elevation_m = (pixel - 1) * {meters_per_pixel:.2f} + {src_min}")
     
-    # Handle nodata: source nodata (-9999) maps to output nodata (255)
-    # Scale valid elevation values to 0-254, reserve 255 for nodata/transparency
+    # Use gdal_translate to create a scaled VRT
+    # Nodata (-9999) will scale to negative, clamped to 0
+    # So we use 0 as nodata instead of 255
     cmd = [
         "gdal_translate",
         "-of", "VRT",
         "-ot", "Byte",
-        "-scale", str(src_min), str(src_max), "0", "254",
-        "-a_nodata", "255",
-        "-srcnodata", "-9999",
-        "-dstnodata", "255",
+        "-scale", str(src_min), str(src_max), "1", "255",
+        "-a_nodata", "0",
         str(input_path),
         str(output_path)
     ]
@@ -832,7 +831,7 @@ def process_state(
     
     # Step 4: Create scaled VRT with 8-bit avarex encoding (no large TIFF)
     if not scaled_path.exists() or not skip_vrt:
-        if not create_scaled_vrt(vrt_path, scaled_path):
+        if not create_scaled_8bit(vrt_path, scaled_path):
             print(f"Failed to create scaled VRT for {name}")
             return False
     else:
