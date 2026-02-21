@@ -200,19 +200,15 @@ def get_dem_products(
     
     print(f"Found {len(all_products)} total products for {name}")
     
-    # Filter out historical files and deduplicate by tile
-    # Extract tile name (e.g., n37w095) from URL and keep most recent
+    # Deduplicate by tile, preferring non-historical and newer dates
+    # Extract tile name (e.g., n37w095) from URL and keep best version
     tile_pattern = re.compile(r'(n\d+w\d+|n\d+e\d+|s\d+w\d+|s\d+e\d+)', re.IGNORECASE)
-    tile_map = {}
-    historical_count = 0
+    date_pattern = re.compile(r'_(\d{8})\.tif')
+    
+    tile_map = {}  # tile_name -> (product, is_historical, date)
     
     for p in all_products:
         url = p.get("downloadURL", "")
-        
-        # Skip historical files
-        if "/historical/" in url:
-            historical_count += 1
-            continue
         
         # Extract tile name from URL
         match = tile_pattern.search(url)
@@ -220,32 +216,32 @@ def get_dem_products(
             continue
         
         tile_name = match.group(1).lower()
+        is_historical = "/historical/" in url
         
-        # Keep track of product by tile, prefer newer dates
-        # Date is often in filename like USGS_1_n37w095_20210607.tif
+        # Extract date from filename
+        date_match = date_pattern.search(url)
+        file_date = date_match.group(1) if date_match else "00000000"
+        
         if tile_name not in tile_map:
-            tile_map[tile_name] = p
+            tile_map[tile_name] = (p, is_historical, file_date)
         else:
-            # Compare dates if available (newer is better)
-            existing_url = tile_map[tile_name].get("downloadURL", "")
-            date_pattern = re.compile(r'_(\d{8})\.tif')
+            existing_product, existing_historical, existing_date = tile_map[tile_name]
             
-            new_match = date_pattern.search(url)
-            old_match = date_pattern.search(existing_url)
-            
-            if new_match and old_match:
-                if new_match.group(1) > old_match.group(1):
-                    tile_map[tile_name] = p
-            elif new_match:
-                tile_map[tile_name] = p
+            # Prefer non-historical over historical
+            if existing_historical and not is_historical:
+                tile_map[tile_name] = (p, is_historical, file_date)
+            # If same historical status, prefer newer date
+            elif existing_historical == is_historical and file_date > existing_date:
+                tile_map[tile_name] = (p, is_historical, file_date)
     
-    filtered = list(tile_map.values())
+    filtered = [item[0] for item in tile_map.values()]
+    historical_used = sum(1 for item in tile_map.values() if item[1])
     
     print(f"After filtering: {len(filtered)} unique tiles")
-    if historical_count > 0:
-        print(f"  Excluded {historical_count} historical files")
-    if len(all_products) - historical_count - len(filtered) > 0:
-        print(f"  Deduplicated {len(all_products) - historical_count - len(filtered)} duplicate tiles")
+    if historical_used > 0:
+        print(f"  Using {historical_used} historical files (no current version available)")
+    if len(all_products) - len(filtered) > 0:
+        print(f"  Deduplicated {len(all_products) - len(filtered)} duplicate tiles")
     
     return filtered
 
