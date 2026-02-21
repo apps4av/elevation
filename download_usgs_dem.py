@@ -9,9 +9,7 @@ USGS 1 arc-second (~30m resolution) National Elevation Dataset (NED)
 is accessed via The National Map (TNM) API.
 """
 
-import os
 import sys
-import json
 import time
 import argparse
 import subprocess
@@ -171,8 +169,10 @@ def get_dem_products(
         page_size = 500
         
         while True:
+            # Query Elevation Products (includes NED, 3DEP, etc.)
             params = {
-                "datasets": "National Elevation Dataset (NED) 1 arc-second",
+                "prodFormats": "GeoTIFF",
+                "prodExtents": "1 x 1 degree",
                 "bbox": f"{smin_lon},{smin_lat},{smax_lon},{smax_lat}",
                 "outputFormat": "JSON",
                 "max": page_size,
@@ -187,8 +187,16 @@ def get_dem_products(
             
             if not products:
                 break
+            
+            # Filter for 1 arc-second elevation TIFFs
+            for p in products:
+                url = p.get("downloadURL", "")
+                title = p.get("title", "").lower()
                 
-            all_products.extend(products)
+                # Include 1 arc-second products (NED or 3DEP)
+                if url.endswith(".tif"):
+                    if "1 arc-second" in title or "USGS_1_" in url or "/1/" in url:
+                        all_products.append(p)
             
             if len(products) < page_size:
                 break
@@ -715,6 +723,13 @@ def create_zip(
                 tile_count += 1
                 if tile_count % 1000 == 0:
                     print(f"  Added {tile_count} tiles...")
+            
+            # Add openlayers.html if it exists
+            openlayers_file = tiles_base / "openlayers.html"
+            if openlayers_file.exists():
+                rel_path = openlayers_file.relative_to(tiles_base.parent)
+                zf.write(openlayers_file, str(rel_path))
+                print(f"  Added openlayers.html")
         
         zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
         print(f"Created zip: {zip_path} ({zip_size_mb:.1f} MB, {tile_count} tiles)")
