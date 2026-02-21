@@ -122,10 +122,11 @@ def get_dem_products(
     
     print(f"Querying TNM API for {name} DEM products...")
     
-    # Paginate through all results
+    # Paginate through all results with retry logic
     all_products = []
     offset = 0
-    page_size = 1000
+    page_size = 250  # Smaller page size to avoid timeouts
+    max_retries = 3
     
     while True:
         params = {
@@ -136,26 +137,36 @@ def get_dem_products(
             "offset": offset,
         }
         
-        try:
-            response = requests.get(TNM_API_URL, params=params, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            
-            products = data.get("items", [])
-            if not products:
+        products = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(TNM_API_URL, params=params, timeout=120)
+                response.raise_for_status()
+                data = response.json()
+                products = data.get("items", [])
                 break
-                
-            all_products.extend(products)
-            print(f"  Fetched {len(products)} products (total: {len(all_products)})")
-            
-            if len(products) < page_size:
-                break
-            
-            offset += page_size
-            
-        except requests.RequestException as e:
-            print(f"Error querying TNM API: {e}")
+            except requests.RequestException as e:
+                print(f"  API query attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    wait_time = 10 * (attempt + 1)
+                    print(f"  Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+        
+        if products is None:
+            print("  Failed to query API after retries, continuing with partial results")
             break
+        
+        if not products:
+            break
+            
+        all_products.extend(products)
+        print(f"  Fetched {len(products)} products (total: {len(all_products)})")
+        
+        if len(products) < page_size:
+            break
+        
+        offset += page_size
+        time.sleep(1)  # Small delay between pages to avoid rate limiting
     
     print(f"Found {len(all_products)} total products for {name}")
     
