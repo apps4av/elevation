@@ -724,8 +724,8 @@ def create_zip(
                 if tile_count % 1000 == 0:
                     print(f"  Added {tile_count} tiles...")
             
-            # Add openlayers.html if it exists
-            openlayers_file = tiles_base / "openlayers.html"
+            # Add openlayers.html if it exists (gdal2tiles puts it in tiles/6/)
+            openlayers_file = tiles_base / "6" / "openlayers.html"
             if openlayers_file.exists():
                 rel_path = openlayers_file.relative_to(tiles_base.parent)
                 zf.write(openlayers_file, str(rel_path))
