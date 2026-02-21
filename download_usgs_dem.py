@@ -94,6 +94,23 @@ REGION_BOUNDS = {
 TNM_API_URL = "https://tnmaccess.nationalmap.gov/api/v1/products"
 
 
+def query_api_with_retry(params: dict, max_retries: int = 3) -> list:
+    """Query TNM API with retry logic."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(TNM_API_URL, params=params, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("items", [])
+        except requests.RequestException as e:
+            print(f"    Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                wait_time = 15 * (attempt + 1)
+                print(f"    Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+    return None
+
+
 def get_dem_products(
     name: str,
     bounds: tuple = None,
@@ -101,7 +118,7 @@ def get_dem_products(
 ) -> list:
     """
     Query TNM API for 1 arc-second DEM products within bounds.
-    Uses pagination to get all products and deduplicates by tile.
+    Splits large areas into smaller sub-queries to avoid timeouts.
     
     Args:
         name: Name for logging (state code or region name)
@@ -122,51 +139,64 @@ def get_dem_products(
     
     print(f"Querying TNM API for {name} DEM products...")
     
-    # Paginate through all results with retry logic
-    all_products = []
-    offset = 0
-    page_size = 250  # Smaller page size to avoid timeouts
-    max_retries = 3
+    # Split large bounding boxes into smaller 5x5 degree tiles
+    tile_size = 5
+    lon_range = max_lon - min_lon
+    lat_range = max_lat - min_lat
     
-    while True:
-        params = {
-            "datasets": "National Elevation Dataset (NED) 1 arc-second",
-            "bbox": f"{min_lon},{min_lat},{max_lon},{max_lat}",
-            "outputFormat": "JSON",
-            "max": page_size,
-            "offset": offset,
-        }
+    sub_boxes = []
+    lon = min_lon
+    while lon < max_lon:
+        lat = min_lat
+        while lat < max_lat:
+            sub_boxes.append((
+                lon,
+                lat,
+                min(lon + tile_size, max_lon),
+                min(lat + tile_size, max_lat)
+            ))
+            lat += tile_size
+        lon += tile_size
+    
+    if len(sub_boxes) > 1:
+        print(f"  Splitting into {len(sub_boxes)} sub-queries to avoid timeouts")
+    
+    all_products = []
+    
+    for i, (smin_lon, smin_lat, smax_lon, smax_lat) in enumerate(sub_boxes):
+        if len(sub_boxes) > 1:
+            print(f"  Querying sub-region {i+1}/{len(sub_boxes)}: ({smin_lon},{smin_lat}) to ({smax_lon},{smax_lat})")
         
-        products = None
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(TNM_API_URL, params=params, timeout=120)
-                response.raise_for_status()
-                data = response.json()
-                products = data.get("items", [])
-                break
-            except requests.RequestException as e:
-                print(f"  API query attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    wait_time = 10 * (attempt + 1)
-                    print(f"  Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
+        offset = 0
+        page_size = 500
         
-        if products is None:
-            print("  Failed to query API after retries, continuing with partial results")
-            break
-        
-        if not products:
-            break
+        while True:
+            params = {
+                "datasets": "National Elevation Dataset (NED) 1 arc-second",
+                "bbox": f"{smin_lon},{smin_lat},{smax_lon},{smax_lat}",
+                "outputFormat": "JSON",
+                "max": page_size,
+                "offset": offset,
+            }
             
-        all_products.extend(products)
-        print(f"  Fetched {len(products)} products (total: {len(all_products)})")
+            products = query_api_with_retry(params)
+            
+            if products is None:
+                print(f"    Failed to query sub-region, skipping")
+                break
+            
+            if not products:
+                break
+                
+            all_products.extend(products)
+            
+            if len(products) < page_size:
+                break
+            
+            offset += page_size
+            time.sleep(0.5)
         
-        if len(products) < page_size:
-            break
-        
-        offset += page_size
-        time.sleep(1)  # Small delay between pages to avoid rate limiting
+        time.sleep(1)  # Delay between sub-regions
     
     print(f"Found {len(all_products)} total products for {name}")
     
