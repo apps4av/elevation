@@ -254,7 +254,7 @@ def get_dem_products(
     return filtered
 
 
-def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
+def download_file(url: str, output_path: Path, retries: int = 3):
     """
     Download a file from URL with retry logic.
     
@@ -264,7 +264,7 @@ def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
         retries: Number of retry attempts
         
     Returns:
-        True if successful, False otherwise
+        True if successful, False if failed, None if 404 (not found)
     """
     for attempt in range(retries):
         try:
@@ -280,8 +280,8 @@ def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
             
         except requests.HTTPError as e:
             if e.response.status_code == 404:
-                print(f"File not found (404), skipping: {output_path.name}")
-                return False
+                print(f"  Skipped (404 not found): {output_path.name}")
+                return None  # Expected skip, not a failure
             print(f"Download attempt {attempt + 1} failed: {e}")
             if attempt < retries - 1:
                 time.sleep(5 * (attempt + 1))
@@ -338,6 +338,9 @@ def download_state_dem(
         download_tasks.append((url, output_path))
     
     if download_tasks:
+        skipped_count = 0
+        failed_count = 0
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(download_file, url, path): path
@@ -346,10 +349,19 @@ def download_state_dem(
             
             for future in as_completed(futures):
                 path = futures[future]
-                if future.result():
+                result = future.result()
+                if result is True:
                     downloaded_files.append(path)
+                elif result is None:
+                    skipped_count += 1  # 404, already logged
                 else:
+                    failed_count += 1
                     print(f"Failed to download: {path.name}")
+        
+        if skipped_count > 0:
+            print(f"Skipped {skipped_count} files (404 not found)")
+        if failed_count > 0:
+            print(f"Failed to download {failed_count} files")
     
     return downloaded_files
 
@@ -758,8 +770,7 @@ def process_state(
     max_workers: int = 4,
     zoom_levels: Optional[str] = None,
     xyz_tiles: bool = False,
-    bounds: tuple = None,
-    is_region: bool = False
+    bounds: tuple = None
 ) -> bool:
     """
     Process a single state or region: download, build VRT, convert to 8-bit, and tile.
@@ -774,7 +785,6 @@ def process_state(
         zoom_levels: Zoom levels for gdal2tiles (e.g., "1-10")
         xyz_tiles: Use XYZ tile naming convention
         bounds: Optional tuple of (minLon, minLat, maxLon, maxLat) for regions
-        is_region: If True, use ELEV_ prefix instead of ELEVATION_
         
     Returns:
         True if successful
@@ -790,9 +800,8 @@ def process_state(
     scaled_path = state_dir / f"{name}_8bit.vrt"
     tiles_base = state_dir / "tiles"
     tiles_dir = tiles_base / "6"
-    manifest_prefix = "ELEV" if is_region else "ELEVATION"
-    manifest_path = state_dir / f"{manifest_prefix}_{name}_NEW"
-    zip_path = state_dir / f"{manifest_prefix}_{name}_NEW.zip"
+    manifest_path = state_dir / f"{name}_ELEVATION"
+    zip_path = state_dir / f"{name}_ELEVATION.zip"
     
     # Step 1: Download
     if not skip_download:
@@ -1043,8 +1052,7 @@ def main():
                 args.workers,
                 zoom_levels=args.zoom,
                 xyz_tiles=args.xyz,
-                bounds=bounds,
-                is_region=process_regions
+                bounds=bounds
             )
             results[target] = success
         except Exception as e:
