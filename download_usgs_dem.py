@@ -97,21 +97,22 @@ TNM_API_URL = "https://tnmaccess.nationalmap.gov/api/v1/products"
 def get_dem_products(
     name: str,
     bounds: tuple = None,
-    resolution: str = "1 arc-second",
-    max_results: int = 500
+    resolution: str = "1 arc-second"
 ) -> list:
     """
     Query TNM API for 1 arc-second DEM products within bounds.
+    Uses pagination to get all products and deduplicates by tile.
     
     Args:
         name: Name for logging (state code or region name)
         bounds: Tuple of (minLon, minLat, maxLon, maxLat). If None, looks up from STATE_BOUNDS.
         resolution: Resolution string (default "1 arc-second")
-        max_results: Maximum number of results to return
         
     Returns:
         List of product dictionaries with download URLs
     """
+    import re
+    
     if bounds is None:
         if name not in STATE_BOUNDS:
             raise ValueError(f"Unknown state code: {name}")
@@ -119,27 +120,93 @@ def get_dem_products(
     
     min_lon, min_lat, max_lon, max_lat = bounds
     
-    params = {
-        "datasets": "National Elevation Dataset (NED) 1 arc-second",
-        "bbox": f"{min_lon},{min_lat},{max_lon},{max_lat}",
-        "outputFormat": "JSON",
-        "max": max_results,
-    }
-    
     print(f"Querying TNM API for {name} DEM products...")
     
-    try:
-        response = requests.get(TNM_API_URL, params=params, timeout=60)
-        response.raise_for_status()
-        data = response.json()
+    # Paginate through all results
+    all_products = []
+    offset = 0
+    page_size = 1000
+    
+    while True:
+        params = {
+            "datasets": "National Elevation Dataset (NED) 1 arc-second",
+            "bbox": f"{min_lon},{min_lat},{max_lon},{max_lat}",
+            "outputFormat": "JSON",
+            "max": page_size,
+            "offset": offset,
+        }
         
-        products = data.get("items", [])
-        print(f"Found {len(products)} products for {name}")
-        return products
+        try:
+            response = requests.get(TNM_API_URL, params=params, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            
+            products = data.get("items", [])
+            if not products:
+                break
+                
+            all_products.extend(products)
+            print(f"  Fetched {len(products)} products (total: {len(all_products)})")
+            
+            if len(products) < page_size:
+                break
+            
+            offset += page_size
+            
+        except requests.RequestException as e:
+            print(f"Error querying TNM API: {e}")
+            break
+    
+    print(f"Found {len(all_products)} total products for {name}")
+    
+    # Filter out historical files and deduplicate by tile
+    # Extract tile name (e.g., n37w095) from URL and keep most recent
+    tile_pattern = re.compile(r'(n\d+w\d+|n\d+e\d+|s\d+w\d+|s\d+e\d+)', re.IGNORECASE)
+    tile_map = {}
+    historical_count = 0
+    
+    for p in all_products:
+        url = p.get("downloadURL", "")
         
-    except requests.RequestException as e:
-        print(f"Error querying TNM API: {e}")
-        return []
+        # Skip historical files
+        if "/historical/" in url:
+            historical_count += 1
+            continue
+        
+        # Extract tile name from URL
+        match = tile_pattern.search(url)
+        if not match:
+            continue
+        
+        tile_name = match.group(1).lower()
+        
+        # Keep track of product by tile, prefer newer dates
+        # Date is often in filename like USGS_1_n37w095_20210607.tif
+        if tile_name not in tile_map:
+            tile_map[tile_name] = p
+        else:
+            # Compare dates if available (newer is better)
+            existing_url = tile_map[tile_name].get("downloadURL", "")
+            date_pattern = re.compile(r'_(\d{8})\.tif')
+            
+            new_match = date_pattern.search(url)
+            old_match = date_pattern.search(existing_url)
+            
+            if new_match and old_match:
+                if new_match.group(1) > old_match.group(1):
+                    tile_map[tile_name] = p
+            elif new_match:
+                tile_map[tile_name] = p
+    
+    filtered = list(tile_map.values())
+    
+    print(f"After filtering: {len(filtered)} unique tiles")
+    if historical_count > 0:
+        print(f"  Excluded {historical_count} historical files")
+    if len(all_products) - historical_count - len(filtered) > 0:
+        print(f"  Deduplicated {len(all_products) - historical_count - len(filtered)} duplicate tiles")
+    
+    return filtered
 
 
 def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
@@ -166,6 +233,13 @@ def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
             
             return True
             
+        except requests.HTTPError as e:
+            if e.response.status_code == 404:
+                print(f"File not found (404), skipping: {output_path.name}")
+                return False
+            print(f"Download attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(5 * (attempt + 1))
         except requests.RequestException as e:
             print(f"Download attempt {attempt + 1} failed: {e}")
             if attempt < retries - 1:
