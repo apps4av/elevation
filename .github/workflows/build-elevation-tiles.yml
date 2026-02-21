@@ -86,6 +86,12 @@ jobs:
           pip install --upgrade pip
           pip install requests
 
+      - name: Cache USGS elevation data
+        uses: actions/cache@v4
+        with:
+          path: output/${{ matrix.state }}/raw
+          key: usgs-dem-${{ matrix.state }}-v1
+
       - name: Build tiles for ${{ matrix.state }}
         run: |
           python3 download_usgs_dem.py ${{ matrix.state }} -o output

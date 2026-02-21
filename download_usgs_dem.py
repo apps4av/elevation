@@ -370,6 +370,7 @@ def convert_to_8bit(
         f"--outfile={output_path}",
         "--type=Byte",
         "--co=COMPRESS=LZW",
+        "--co=BIGTIFF=YES",
         "--hideNoData",
         "--overwrite"
     ]
