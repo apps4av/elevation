@@ -1,0 +1,55 @@
+name: Build Elevation Tiles (Regions)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        region:
+          - AK
+          - PAC
+          - NW
+          - SW
+          - NC
+          - EC
+          - SC
+          - NE
+          - SE
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GDAL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin python3-gdal
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests
+
+      - name: Build tiles for region ${{ matrix.region }}
+        run: |
+          python3 download_usgs_dem.py -r ${{ matrix.region }} -o output
+
+      - name: Upload to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: apps4av.org
+          username: apps4av
+          password: ${{ secrets.MAMBA_PASSWORD }}
+          port: 22
+          source: output/${{ matrix.region }}/${{ matrix.region }}.zip
+          target: /home/apps4av/mamba.dreamhosters.com/new/staging
+          strip_components: 2

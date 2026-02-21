@@ -77,30 +77,47 @@ STATE_BOUNDS = {
     "PR": (-67.945, 17.881, -65.221, 18.516),
 }
 
+# Region bounding boxes (minLon, minLat, maxLon, maxLat)
+REGION_BOUNDS = {
+    "AK":  (-180, 51, -126, 71),   # Alaska
+    "PAC": (-162, 18, -152, 24),   # Pacific (Hawaii)
+    "NW":  (-125, 40, -103, 50),   # Northwest
+    "SW":  (-125, 15, -103, 40),   # Southwest
+    "NC":  (-105, 37, -90, 50),    # North Central
+    "EC":  (-95, 37, -80, 50),     # East Central
+    "SC":  (-110, 15, -90, 37),    # South Central
+    "NE":  (-80, 37, -60, 50),     # Northeast
+    "SE":  (-90, 15, -60, 37),     # Southeast
+}
+
 # TNM API endpoint for searching datasets
 TNM_API_URL = "https://tnmaccess.nationalmap.gov/api/v1/products"
 
 
 def get_dem_products(
-    state: str,
+    name: str,
+    bounds: tuple = None,
     resolution: str = "1 arc-second",
     max_results: int = 500
 ) -> list:
     """
-    Query TNM API for 1 arc-second DEM products within state bounds.
+    Query TNM API for 1 arc-second DEM products within bounds.
     
     Args:
-        state: Two-letter state code
+        name: Name for logging (state code or region name)
+        bounds: Tuple of (minLon, minLat, maxLon, maxLat). If None, looks up from STATE_BOUNDS.
         resolution: Resolution string (default "1 arc-second")
         max_results: Maximum number of results to return
         
     Returns:
         List of product dictionaries with download URLs
     """
-    if state not in STATE_BOUNDS:
-        raise ValueError(f"Unknown state code: {state}")
+    if bounds is None:
+        if name not in STATE_BOUNDS:
+            raise ValueError(f"Unknown state code: {name}")
+        bounds = STATE_BOUNDS[name]
     
-    min_lon, min_lat, max_lon, max_lat = STATE_BOUNDS[state]
+    min_lon, min_lat, max_lon, max_lat = bounds
     
     params = {
         "datasets": "National Elevation Dataset (NED) 1 arc-second",
@@ -109,7 +126,7 @@ def get_dem_products(
         "max": max_results,
     }
     
-    print(f"Querying TNM API for {state} DEM products...")
+    print(f"Querying TNM API for {name} DEM products...")
     
     try:
         response = requests.get(TNM_API_URL, params=params, timeout=60)
@@ -117,7 +134,7 @@ def get_dem_products(
         data = response.json()
         
         products = data.get("items", [])
-        print(f"Found {len(products)} products for {state}")
+        print(f"Found {len(products)} products for {name}")
         return products
         
     except requests.RequestException as e:
@@ -158,27 +175,29 @@ def download_file(url: str, output_path: Path, retries: int = 3) -> bool:
 
 
 def download_state_dem(
-    state: str,
+    name: str,
     output_dir: Path,
-    max_workers: int = 4
+    max_workers: int = 4,
+    bounds: tuple = None
 ) -> list:
     """
-    Download all 1 arc-second DEM tiles for a state.
+    Download all 1 arc-second DEM tiles for a state or region.
     
     Args:
-        state: Two-letter state code
+        name: State code or region name
         output_dir: Directory to save downloaded files
         max_workers: Number of concurrent downloads
+        bounds: Optional tuple of (minLon, minLat, maxLon, maxLat)
         
     Returns:
         List of downloaded file paths
     """
-    state_dir = output_dir / state / "raw"
+    state_dir = output_dir / name / "raw"
     state_dir.mkdir(parents=True, exist_ok=True)
     
-    products = get_dem_products(state)
+    products = get_dem_products(name, bounds=bounds)
     if not products:
-        print(f"No products found for {state}")
+        print(f"No products found for {name}")
         return []
     
     downloaded_files = []
@@ -608,20 +627,22 @@ def create_zip(
 
 
 def process_state(
-    state: str,
+    name: str,
     output_dir: Path,
     tile_size: int = 512,
     skip_download: bool = False,
     skip_vrt: bool = False,
     max_workers: int = 4,
     zoom_levels: Optional[str] = None,
-    xyz_tiles: bool = False
+    xyz_tiles: bool = False,
+    bounds: tuple = None,
+    is_region: bool = False
 ) -> bool:
     """
-    Process a single state: download, build VRT, convert to 8-bit, and tile.
+    Process a single state or region: download, build VRT, convert to 8-bit, and tile.
     
     Args:
-        state: Two-letter state code
+        name: State code or region name
         output_dir: Base output directory
         tile_size: Tile dimension in pixels
         skip_download: Skip download step if files exist
@@ -629,41 +650,44 @@ def process_state(
         max_workers: Number of concurrent downloads
         zoom_levels: Zoom levels for gdal2tiles (e.g., "1-10")
         xyz_tiles: Use XYZ tile naming convention
+        bounds: Optional tuple of (minLon, minLat, maxLon, maxLat) for regions
+        is_region: If True, use ELEV_ prefix instead of ELEVATION_
         
     Returns:
         True if successful
     """
     print(f"\n{'='*60}")
-    print(f"Processing: {state}")
+    print(f"Processing: {name}")
     print(f"{'='*60}")
     
-    state_dir = output_dir / state
+    state_dir = output_dir / name
     state_dir.mkdir(parents=True, exist_ok=True)
     
-    vrt_path = state_dir / f"{state}.vrt"
-    scaled_path = state_dir / f"{state}_8bit.tif"
+    vrt_path = state_dir / f"{name}.vrt"
+    scaled_path = state_dir / f"{name}_8bit.tif"
     tiles_base = state_dir / "tiles"
     tiles_dir = tiles_base / "6"
-    manifest_path = state_dir / f"ELEVATION_{state}_NEW"
-    zip_path = state_dir / f"{state}.zip"
+    manifest_prefix = "ELEV" if is_region else "ELEVATION"
+    manifest_path = state_dir / f"{manifest_prefix}_{name}_NEW"
+    zip_path = state_dir / f"{name}.zip"
     
     # Step 1: Download
     if not skip_download:
-        downloaded = download_state_dem(state, output_dir, max_workers)
+        downloaded = download_state_dem(name, output_dir, max_workers, bounds=bounds)
         if not downloaded:
-            print(f"No files downloaded for {state}")
+            print(f"No files downloaded for {name}")
             return False
     
     # Step 2: Extract TIFFs
     tiff_files = extract_tiffs(state_dir)
     if not tiff_files:
-        print(f"No TIFF files found for {state}")
+        print(f"No TIFF files found for {name}")
         return False
     
     # Step 3: Build VRT (no merge, just virtual mosaic)
     if not skip_vrt or not vrt_path.exists():
         if not build_vrt(tiff_files, vrt_path):
-            print(f"Failed to build VRT for {state}")
+            print(f"Failed to build VRT for {name}")
             return False
     else:
         print(f"Using existing VRT: {vrt_path}")
@@ -671,7 +695,7 @@ def process_state(
     # Step 4: Convert to 8-bit using avarex encoding
     if not scaled_path.exists() or not skip_vrt:
         if not convert_to_8bit(vrt_path, scaled_path):
-            print(f"Failed to convert to 8-bit for {state}")
+            print(f"Failed to convert to 8-bit for {name}")
             return False
     else:
         print(f"Using existing 8-bit file: {scaled_path}")
@@ -688,20 +712,20 @@ def process_state(
         tile_size=tile_size,
         zoom_levels=zoom_levels
     ):
-        print(f"Failed to create tiles for {state}")
+        print(f"Failed to create tiles for {name}")
         return False
     
     # Step 6: Generate manifest file (use tiles_base for correct path format: tiles/6/z/x/y.png)
     if not generate_manifest(tiles_base, manifest_path):
-        print(f"Failed to generate manifest for {state}")
+        print(f"Failed to generate manifest for {name}")
         return False
     
     # Step 7: Create zip file
-    if not create_zip(state, tiles_base, manifest_path, zip_path):
-        print(f"Failed to create zip for {state}")
+    if not create_zip(name, tiles_base, manifest_path, zip_path):
+        print(f"Failed to create zip for {name}")
         return False
     
-    print(f"\nCompleted processing for {state}")
+    print(f"\nCompleted processing for {name}")
     return True
 
 
@@ -782,6 +806,22 @@ def main():
         action="store_true",
         help="List available state codes and exit"
     )
+    parser.add_argument(
+        "-r", "--region",
+        type=str,
+        help="Single region code to process (e.g., NW, SW, NE)"
+    )
+    parser.add_argument(
+        "--regions",
+        nargs="*",
+        default=[],
+        help="Region codes to process (e.g., NW SW NE) or ALL for all regions"
+    )
+    parser.add_argument(
+        "--list-regions",
+        action="store_true",
+        help="List available region codes and exit"
+    )
     
     args = parser.parse_args()
     
@@ -792,61 +832,101 @@ def main():
             print(f"  {state}: ({bounds[0]:.2f}, {bounds[1]:.2f}) to ({bounds[2]:.2f}, {bounds[3]:.2f})")
         return 0
     
+    if args.list_regions:
+        print("Available region codes:")
+        for region in sorted(REGION_BOUNDS.keys()):
+            bounds = REGION_BOUNDS[region]
+            print(f"  {region}: ({bounds[0]:.2f}, {bounds[1]:.2f}) to ({bounds[2]:.2f}, {bounds[3]:.2f})")
+        return 0
+    
     # Check GDAL installation
     if not check_gdal_installation():
         return 1
     
-    # Determine states to process
-    # Priority: --state flag > positional arguments > default to ALL
-    if args.state:
+    # Determine what to process: regions or states
+    process_regions = False
+    targets = []
+    
+    # Check for region arguments first
+    if args.region:
+        region_code = args.region.upper()
+        if region_code not in REGION_BOUNDS:
+            print(f"Invalid region code: {region_code}")
+            print("Use --list-regions to see available codes")
+            return 1
+        targets = [region_code]
+        process_regions = True
+    elif args.regions:
+        if "ALL" in [r.upper() for r in args.regions]:
+            targets = list(REGION_BOUNDS.keys())
+        else:
+            targets = [r.upper() for r in args.regions]
+            invalid = [r for r in targets if r not in REGION_BOUNDS]
+            if invalid:
+                print(f"Invalid region codes: {', '.join(invalid)}")
+                print("Use --list-regions to see available codes")
+                return 1
+        process_regions = True
+    # Fall back to state arguments
+    elif args.state:
         state_code = args.state.upper()
         if state_code not in STATE_BOUNDS:
             print(f"Invalid state code: {state_code}")
             print("Use --list-states to see available codes")
             return 1
-        states = [state_code]
+        targets = [state_code]
     elif args.states:
         if "ALL" in [s.upper() for s in args.states]:
-            states = list(STATE_BOUNDS.keys())
+            targets = list(STATE_BOUNDS.keys())
         else:
-            states = [s.upper() for s in args.states]
-            invalid = [s for s in states if s not in STATE_BOUNDS]
+            targets = [s.upper() for s in args.states]
+            invalid = [s for s in targets if s not in STATE_BOUNDS]
             if invalid:
                 print(f"Invalid state codes: {', '.join(invalid)}")
                 print("Use --list-states to see available codes")
                 return 1
     else:
-        print("No state specified. Use -s STATE or provide state codes as arguments.")
-        print("Use --list-states to see available codes, or use ALL for all states.")
+        print("No state or region specified.")
+        print("Use -s STATE or provide state codes as arguments.")
+        print("Use -r REGION or --regions for regions.")
+        print("Use --list-states or --list-regions to see available codes.")
         return 1
     
     # Create output directory
     args.output.mkdir(parents=True, exist_ok=True)
     
-    print(f"Processing {len(states)} states")
+    target_type = "regions" if process_regions else "states"
+    print(f"Processing {len(targets)} {target_type}")
     print(f"Output directory: {args.output}")
     print(f"Tile size: {args.tile_size}x{args.tile_size}")
     print(f"Tile format: PNG (8-bit grayscale)")
     print(f"Zoom levels: {args.zoom}")
     
-    # Process each state
+    # Process each target
     results = {}
-    for state in states:
+    for target in targets:
         try:
+            if process_regions:
+                bounds = REGION_BOUNDS[target]
+            else:
+                bounds = None
+            
             success = process_state(
-                state,
+                target,
                 args.output,
                 args.tile_size,
                 args.skip_download,
                 args.skip_vrt,
                 args.workers,
                 zoom_levels=args.zoom,
-                xyz_tiles=args.xyz
+                xyz_tiles=args.xyz,
+                bounds=bounds,
+                is_region=process_regions
             )
-            results[state] = success
+            results[target] = success
         except Exception as e:
-            print(f"Error processing {state}: {e}")
-            results[state] = False
+            print(f"Error processing {target}: {e}")
+            results[target] = False
     
     # Summary
     print(f"\n{'='*60}")
@@ -856,11 +936,11 @@ def main():
     successful = [s for s, r in results.items() if r]
     failed = [s for s, r in results.items() if not r]
     
-    print(f"Successful: {len(successful)} states")
+    print(f"Successful: {len(successful)} {target_type}")
     if successful:
         print(f"  {', '.join(successful)}")
     
-    print(f"Failed: {len(failed)} states")
+    print(f"Failed: {len(failed)} {target_type}")
     if failed:
         print(f"  {', '.join(failed)}")
     
