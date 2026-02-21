@@ -461,17 +461,20 @@ def create_scaled_vrt(
     output_path: Path
 ) -> bool:
     """
-    Create a VRT that applies 8-bit avarex encoding without creating a large TIFF.
+    Create a VRT that applies 8-bit elevation encoding without creating a large TIFF.
     
-    Encoding formula (from avarex elevation_tile_provider.dart):
-        elevation_ft = (pixel_value * 80.4711845056) - 364.431597044586
+    Encoding covers world elevation range:
+        pixel 0   = -430 m (-1,411 ft) - Dead Sea (lowest point on Earth)
+        pixel 254 = 8,849 m (29,032 ft) - Mount Everest (highest point on Earth)
+        pixel 255 = nodata (transparent)
+    
+    Decoding formula:
+        elevation_m = pixel_value * 36.53 - 430
+        elevation_ft = pixel_value * 119.85 - 1411
         
-    So to encode:
-        pixel_value = (elevation_ft + 364.431597044586) / 80.4711845056
-        
-    This gives a range of approximately:
-        pixel 0   = -364 ft (-111 m)
-        pixel 255 = 20,156 ft (6,143 m)
+    Encoding formula:
+        pixel_value = (elevation_m + 430) / 36.53
+        pixel_value = (elevation_ft + 1411) / 119.85
     
     Args:
         input_path: Input DEM VRT/GeoTIFF path (elevation in meters)
@@ -480,27 +483,32 @@ def create_scaled_vrt(
     Returns:
         True if successful
     """
-    # Avarex encoding constants
-    SLOPE = 80.4711845056
-    INTERCEPT = -364.431597044586
-    METERS_TO_FEET = 3.28084
+    # World elevation range
+    DEAD_SEA_M = -430      # Lowest point on Earth (meters)
+    EVEREST_M = 8849       # Highest point on Earth (meters)
     
-    print("Creating scaled VRT with avarex encoding (no large TIFF)...")
-    print(f"  Formula: pixel = (elevation_m * {METERS_TO_FEET} + {-INTERCEPT:.2f}) / {SLOPE:.2f}")
-    print(f"  Range: pixel 0 = {INTERCEPT:.0f} ft, pixel 255 = {255 * SLOPE + INTERCEPT:.0f} ft")
+    # Scale parameters
+    src_min = DEAD_SEA_M   # -430 m -> pixel 0
+    src_max = EVEREST_M    # 8849 m -> pixel 254
     
-    # Calculate scale parameters for gdal_translate
-    # We need to find the meter values that map to 0 and 255
-    # pixel 0: elevation_m = (0 * SLOPE + INTERCEPT) / METERS_TO_FEET
-    # pixel 255: elevation_m = (255 * SLOPE + INTERCEPT) / METERS_TO_FEET
-    src_min = (0 * SLOPE + INTERCEPT) / METERS_TO_FEET  # -111.07 m
-    src_max = (255 * SLOPE + INTERCEPT) / METERS_TO_FEET  # 6143.35 m
+    meters_per_pixel = (src_max - src_min) / 254
+    feet_per_pixel = meters_per_pixel * 3.28084
     
+    print("Creating scaled VRT with world elevation encoding...")
+    print(f"  Range: pixel 0 = {src_min} m, pixel 254 = {src_max} m")
+    print(f"  Resolution: {meters_per_pixel:.2f} m/pixel ({feet_per_pixel:.2f} ft/pixel)")
+    print(f"  Decode: elevation_m = pixel * {meters_per_pixel:.2f} + {src_min}")
+    
+    # Handle nodata: source nodata (-9999) maps to output nodata (255)
+    # Scale valid elevation values to 0-254, reserve 255 for nodata/transparency
     cmd = [
         "gdal_translate",
         "-of", "VRT",
         "-ot", "Byte",
-        "-scale", str(src_min), str(src_max), "0", "255",
+        "-scale", str(src_min), str(src_max), "0", "254",
+        "-a_nodata", "255",
+        "-srcnodata", "-9999",
+        "-dstnodata", "255",
         str(input_path),
         str(output_path)
     ]
@@ -552,7 +560,7 @@ def create_tiles(
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Creating {tile_size}x{tile_size} PNG tiles with gdal2tiles (no alpha)...")
+    print(f"Creating {tile_size}x{tile_size} PNG tiles with gdal2tiles (with alpha for nodata)...")
     
     cmd = [
         "gdal2tiles.py",
@@ -561,7 +569,6 @@ def create_tiles(
         "-w", "all",
         "-r", "bilinear",
         "--tiledriver", "PNG",
-        "-a", "0",
     ]
     
     if zoom_levels:
@@ -619,7 +626,7 @@ def create_tiles_xyz(
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Creating XYZ {tile_size}x{tile_size} PNG tiles (no alpha)...")
+    print(f"Creating XYZ {tile_size}x{tile_size} PNG tiles (with alpha for nodata)...")
     
     cmd = [
         "gdal2tiles.py",
@@ -629,7 +636,6 @@ def create_tiles_xyz(
         "-w", "all",
         "-r", "bilinear",
         "--tiledriver", "PNG",
-        "-a", "0",
     ]
     
     if zoom_levels:
