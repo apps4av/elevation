@@ -463,18 +463,15 @@ def create_scaled_8bit(
     """
     Create an 8-bit VRT with elevation encoding (no large file created).
     
-    Encoding covers world elevation range:
-        pixel 0   = nodata (transparent)
-        pixel 1   = -430 m (-1,411 ft) - Dead Sea (lowest point on Earth)
-        pixel 255 = 8,849 m (29,032 ft) - Mount Everest (highest point on Earth)
-    
-    Decoding formula:
-        elevation_m = (pixel_value - 1) * 36.46 - 430
-        elevation_ft = (pixel_value - 1) * 119.63 - 1411
+    Uses original avarex encoding formula:
+        elevation_ft = pixel * 80.4711845056 - 364.431597044586
         
-    Encoding formula:
-        pixel_value = (elevation_m + 430) / 36.46 + 1
-        pixel_value = (elevation_ft + 1411) / 119.63 + 1
+    Encoding (inverse):
+        pixel = (elevation_ft + 364.431597044586) / 80.4711845056
+        
+    Range:
+        pixel 0   = -364 ft (-111 m)
+        pixel 255 = 20,156 ft (6,143 m)
     
     Args:
         input_path: Input DEM VRT/GeoTIFF path (elevation in meters)
@@ -483,31 +480,31 @@ def create_scaled_8bit(
     Returns:
         True if successful
     """
-    # World elevation range
-    DEAD_SEA_M = -430      # Lowest point on Earth (meters)
-    EVEREST_M = 8849       # Highest point on Earth (meters)
+    # Original avarex constants (in feet)
+    SLOPE_FT = 80.4711845056
+    INTERCEPT_FT = -364.431597044586
     
-    # Scale parameters (pixel 1 = lowest, pixel 255 = highest, pixel 0 = nodata)
-    src_min = DEAD_SEA_M   # -430 m -> pixel 1
-    src_max = EVEREST_M    # 8849 m -> pixel 255
+    # Calculate elevation range in meters
+    # pixel 0: elevation_ft = -364.43 ft
+    # pixel 255: elevation_ft = 255 * 80.47 - 364.43 = 20155.62 ft
+    MIN_ELEV_FT = INTERCEPT_FT  # -364.43 ft
+    MAX_ELEV_FT = 255 * SLOPE_FT + INTERCEPT_FT  # 20155.62 ft
     
-    meters_per_pixel = (src_max - src_min) / 254
-    feet_per_pixel = meters_per_pixel * 3.28084
+    MIN_ELEV_M = MIN_ELEV_FT / 3.28084  # -111.08 m
+    MAX_ELEV_M = MAX_ELEV_FT / 3.28084  # 6143.18 m
     
-    print("Creating scaled VRT with world elevation encoding...")
-    print(f"  Range: pixel 1 = {src_min} m, pixel 255 = {src_max} m, pixel 0 = nodata")
-    print(f"  Resolution: {meters_per_pixel:.2f} m/pixel ({feet_per_pixel:.2f} ft/pixel)")
-    print(f"  Decode: elevation_m = (pixel - 1) * {meters_per_pixel:.2f} + {src_min}")
+    print("Creating scaled VRT with avarex elevation encoding...")
+    print(f"  Range: pixel 0 = {MIN_ELEV_M:.1f} m ({MIN_ELEV_FT:.1f} ft)")
+    print(f"         pixel 255 = {MAX_ELEV_M:.1f} m ({MAX_ELEV_FT:.1f} ft)")
+    print(f"  Decode: elevation_ft = pixel * {SLOPE_FT} + ({INTERCEPT_FT})")
     
     # Use gdal_translate to create a scaled VRT
-    # Nodata (-9999) will scale to negative, clamped to 0
-    # So we use 0 as nodata instead of 255
+    # Scale from elevation in meters to pixel value 0-255
     cmd = [
         "gdal_translate",
         "-of", "VRT",
         "-ot", "Byte",
-        "-scale", str(src_min), str(src_max), "1", "255",
-        "-a_nodata", "0",
+        "-scale", str(MIN_ELEV_M), str(MAX_ELEV_M), "0", "255",
         str(input_path),
         str(output_path)
     ]
@@ -866,6 +863,254 @@ def process_state(
     return True
 
 
+def lon_lat_to_tile(lon: float, lat: float, zoom: int) -> tuple:
+    """Convert longitude/latitude to tile x/y at given zoom level."""
+    import math
+    n = 2 ** zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_rad = math.radians(lat)
+    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return (x, y)
+
+
+def get_tiles_in_region(
+    tiles_dir: Path,
+    region_bounds: tuple,
+    zoom_min: int = 1,
+    zoom_max: int = 10,
+    tms: bool = True
+) -> list:
+    """
+    Get list of tile paths that fall within a region's bounds.
+    
+    Args:
+        tiles_dir: Directory containing tiles (z/x/y.png structure)
+        region_bounds: Tuple of (min_lon, min_lat, max_lon, max_lat)
+        zoom_min: Minimum zoom level
+        zoom_max: Maximum zoom level
+        tms: If True, use TMS y-coordinate (y=0 at bottom, gdal2tiles default)
+        
+    Returns:
+        List of tile paths relative to tiles_dir
+    """
+    min_lon, min_lat, max_lon, max_lat = region_bounds
+    tiles = []
+    
+    for zoom in range(zoom_min, zoom_max + 1):
+        # Get tile range for region bounds (XYZ coordinates)
+        # Note: In XYZ, y increases southward, so max_lat gives smaller y
+        min_x, y1 = lon_lat_to_tile(min_lon, max_lat, zoom)
+        max_x, y2 = lon_lat_to_tile(max_lon, min_lat, zoom)
+        xyz_min_y = min(y1, y2)
+        xyz_max_y = max(y1, y2)
+        
+        # Clamp to valid range
+        n = 2 ** zoom
+        min_x = max(0, min_x)
+        max_x = min(n - 1, max_x)
+        xyz_min_y = max(0, xyz_min_y)
+        xyz_max_y = min(n - 1, xyz_max_y)
+        
+        for tx in range(min_x, max_x + 1):
+            for xyz_y in range(xyz_min_y, xyz_max_y + 1):
+                # Convert XYZ y to TMS y if needed
+                if tms:
+                    ty = (n - 1) - xyz_y
+                else:
+                    ty = xyz_y
+                    
+                tile_rel = Path(str(zoom)) / str(tx) / f"{ty}.png"
+                tile_path = tiles_dir / tile_rel
+                if tile_path.exists():
+                    tiles.append(tile_rel)
+    
+    return tiles
+
+
+def create_region_zip(
+    region_name: str,
+    tiles_dir: Path,
+    region_bounds: tuple,
+    output_dir: Path,
+    zoom_min: int = 1,
+    zoom_max: int = 10
+) -> Optional[Path]:
+    """
+    Create a zip file containing tiles for a specific region.
+    
+    Args:
+        region_name: Region code (e.g., 'NW', 'SE')
+        tiles_dir: Directory containing all tiles
+        region_bounds: Tuple of (min_lon, min_lat, max_lon, max_lat)
+        output_dir: Directory to write zip file
+        zoom_min: Minimum zoom level
+        zoom_max: Maximum zoom level
+        
+    Returns:
+        Path to created zip file, or None if failed
+    """
+    print(f"\nCreating zip for region {region_name}...")
+    
+    # Get tiles in this region
+    tiles = get_tiles_in_region(tiles_dir, region_bounds, zoom_min, zoom_max)
+    
+    if not tiles:
+        print(f"  No tiles found for region {region_name}")
+        return None
+    
+    print(f"  Found {len(tiles)} tiles in region")
+    
+    # Create manifest
+    manifest_path = output_dir / f"{region_name}_ELEVATION"
+    with open(manifest_path, 'w') as f:
+        f.write("2603\n")
+        for tile_rel in sorted(tiles):
+            f.write(f"tiles/6/{tile_rel}\n")
+    
+    print(f"  Created manifest: {manifest_path}")
+    
+    # Create zip
+    zip_path = output_dir / f"{region_name}_ELEVATION.zip"
+    
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+        # Add manifest
+        zf.write(manifest_path, f"{region_name}_ELEVATION")
+        
+        # Add tiles with tiles/6/ prefix
+        for tile_rel in tiles:
+            tile_path = tiles_dir / tile_rel
+            arcname = f"tiles/6/{tile_rel}"
+            zf.write(tile_path, arcname)
+    
+    zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+    print(f"  Created zip: {zip_path} ({zip_size_mb:.1f} MB)")
+    
+    return zip_path
+
+
+def process_usa(
+    output_dir: Path,
+    tile_size: int = 512,
+    skip_download: bool = False,
+    skip_vrt: bool = False,
+    skip_tiles: bool = False,
+    max_workers: int = 4,
+    zoom_levels: str = "1-10"
+) -> bool:
+    """
+    Process entire USA: download all data, build single VRT, generate tiles,
+    then split into regional zip files.
+    
+    Args:
+        output_dir: Base output directory
+        tile_size: Tile dimension in pixels
+        skip_download: Skip download step if files exist
+        skip_vrt: Skip VRT build step if VRT exists
+        skip_tiles: Skip tile generation, only create regional zips
+        max_workers: Number of concurrent downloads
+        zoom_levels: Zoom levels string (e.g., "1-10")
+        
+    Returns:
+        True if successful
+    """
+    print(f"\n{'='*60}")
+    print("Processing: USA (all regions)")
+    print(f"{'='*60}")
+    
+    usa_dir = output_dir / "USA"
+    usa_dir.mkdir(parents=True, exist_ok=True)
+    
+    vrt_path = usa_dir / "USA.vrt"
+    scaled_path = usa_dir / "USA_8bit.vrt"
+    tiles_base = usa_dir / "tiles"
+    tiles_dir = tiles_base / "6"
+    
+    # USA bounds (CONUS + Alaska + Hawaii + territories)
+    all_bounds = (-180, 15, -60, 72)
+    
+    # Step 1: Download all data
+    if not skip_download:
+        print("\nStep 1: Downloading all USA elevation data...")
+        downloaded = download_state_dem("USA", output_dir, max_workers, bounds=all_bounds)
+        if not downloaded:
+            print("No files downloaded for USA")
+            return False
+    else:
+        print("\nStep 1: Skipping download (using existing files)")
+    
+    # Step 2: Extract TIFFs
+    print("\nStep 2: Extracting TIFF files...")
+    tiff_files = extract_tiffs(usa_dir)
+    if not tiff_files:
+        print("No TIFF files found for USA")
+        return False
+    
+    # Step 3: Build single VRT
+    if not skip_vrt or not vrt_path.exists():
+        print("\nStep 3: Building VRT mosaic...")
+        if not build_vrt(tiff_files, vrt_path):
+            print("Failed to build VRT for USA")
+            return False
+    else:
+        print(f"\nStep 3: Using existing VRT: {vrt_path}")
+    
+    # Step 4: Create scaled 8-bit VRT
+    if not skip_vrt or not scaled_path.exists():
+        print("\nStep 4: Creating scaled 8-bit VRT...")
+        if not create_scaled_8bit(vrt_path, scaled_path):
+            print("Failed to create scaled VRT for USA")
+            return False
+    else:
+        print(f"\nStep 4: Using existing scaled VRT: {scaled_path}")
+    
+    # Step 5: Create tiles
+    if not skip_tiles:
+        print("\nStep 5: Creating tiles with gdal2tiles...")
+        if not create_tiles(scaled_path, tiles_dir, tile_size=tile_size, zoom_levels=zoom_levels):
+            print("Failed to create tiles for USA")
+            return False
+    else:
+        print("\nStep 5: Skipping tile generation (using existing tiles)")
+    
+    # Parse zoom levels for region splitting
+    zoom_parts = zoom_levels.split('-')
+    zoom_min = int(zoom_parts[0])
+    zoom_max = int(zoom_parts[1]) if len(zoom_parts) > 1 else zoom_min
+    
+    # Step 6: Create regional zip files
+    print("\nStep 6: Creating regional zip files...")
+    regions_dir = output_dir / "regions"
+    regions_dir.mkdir(parents=True, exist_ok=True)
+    
+    results = {}
+    for region_name, region_bounds in REGION_BOUNDS.items():
+        zip_path = create_region_zip(
+            region_name,
+            tiles_dir,
+            region_bounds,
+            regions_dir,
+            zoom_min=zoom_min,
+            zoom_max=zoom_max
+        )
+        results[region_name] = zip_path is not None
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print("REGIONAL ZIP SUMMARY")
+    print(f"{'='*60}")
+    successful = [r for r, ok in results.items() if ok]
+    failed = [r for r, ok in results.items() if not ok]
+    print(f"Successful: {len(successful)} regions")
+    if successful:
+        print(f"  {', '.join(successful)}")
+    if failed:
+        print(f"Failed: {len(failed)} regions")
+        print(f"  {', '.join(failed)}")
+    
+    print(f"\nCompleted processing for USA")
+    return len(failed) == 0
+
+
 def check_gdal_installation():
     """Check if GDAL tools are installed."""
     tools = ["gdalbuildvrt", "gdal_translate", "gdalinfo", "gdal2tiles.py", "gdal_calc.py"]
@@ -959,6 +1204,16 @@ def main():
         action="store_true",
         help="List available region codes and exit"
     )
+    parser.add_argument(
+        "--usa",
+        action="store_true",
+        help="Process entire USA: download all data, build single VRT, generate tiles, split into regional zips"
+    )
+    parser.add_argument(
+        "--skip-tiles",
+        action="store_true",
+        help="Skip tile generation step (use with --usa to only regenerate regional zips)"
+    )
     
     args = parser.parse_args()
     
@@ -979,6 +1234,27 @@ def main():
     # Check GDAL installation
     if not check_gdal_installation():
         return 1
+    
+    # Handle --usa mode
+    if args.usa:
+        args.output.mkdir(parents=True, exist_ok=True)
+        
+        print(f"USA mode: Process entire USA and split into regional zips")
+        print(f"Output directory: {args.output}")
+        print(f"Tile size: {args.tile_size}x{args.tile_size}")
+        print(f"Tile format: PNG (8-bit grayscale)")
+        print(f"Zoom levels: {args.zoom}")
+        
+        success = process_usa(
+            args.output,
+            tile_size=args.tile_size,
+            skip_download=args.skip_download,
+            skip_vrt=args.skip_vrt,
+            skip_tiles=args.skip_tiles,
+            max_workers=args.workers,
+            zoom_levels=args.zoom
+        )
+        return 0 if success else 1
     
     # Determine what to process: regions or states
     process_regions = False
